@@ -4,10 +4,18 @@ const cors = require("cors");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const ObjectId = require("mongodb").ObjectId;
 require("dotenv").config();
+const stripe = require("stripe")(process.env.PAYMENT_SECRET_KEY);
 
 const port = 5000;
 
-app.use(cors());
+const corsOptions = {
+    origin: process.env.CLIENT_ORIGIN,
+    credentials: true, //access-control-allow-credentials:true
+    optionSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+
 app.use(express.json());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.uhu2y.mongodb.net/?retryWrites=true&w=majority`;
@@ -55,19 +63,26 @@ async function run() {
             const findProduct = await products.findOne(query);
             res.json(findProduct);
         });
+        // GET PROFILE
         app.get("/getUsers/:email", async (req, res) => {
             const { email } = req.params;
             const query = { email: email };
             const findUser = await users.findOne(query);
-            const data = {
-                db_id: findUser._id,
-                name: findUser.name,
-                addresses: findUser.addresses,
-                email: findUser.email,
-                phone: findUser.phone,
-            };
-            res.json(data);
+            if (findUser) {
+                const data = {
+                    db_id: findUser._id,
+                    name: findUser.name,
+                    shippingAddress: findUser.shippingAddress,
+                    billingAddress: findUser.billingAddress,
+                    email: findUser.email,
+                    phone: findUser.phone,
+                };
+                res.json(data);
+            } else {
+                res.status(404).json("not found");
+            }
         });
+
         app.get("/getCart/:email", async (req, res) => {
             const { email } = req.params;
             const query = { email: email };
@@ -89,18 +104,20 @@ async function run() {
             const filter = { title: "userIds" };
             const findId = Ids.find({});
             const userIdArray = await findId.toArray();
-
             const presentId = parseInt(userIdArray[0].lastUserId);
-
             const userCart = [];
             const userOrders = [];
-            const addresses = [{ shipping: "" }, { billing: "" }];
+            // const addresses = [{ shipping: "" }, { billing: "" }];
+            const shippingAddress = "";
+            const billingAddress = "";
             const userCreatedTime = new Date().toLocaleString("en-US");
             const user = req.body;
+
             const newUser = {
                 userId: presentId,
                 userCart,
-                addresses,
+                billingAddress,
+                shippingAddress,
                 userOrders,
                 userCreatedTime,
                 ...user,
@@ -124,21 +141,36 @@ async function run() {
             res.json(result);
         });
 
+        // PAYMENT
+        app.post("/create-payment-intent", async (req, res) => {
+            const { price } = req.body;
+            if (price <= 0) {
+                res.status(404).send("No data");
+                return;
+            }
+            const amount = price * 100;
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: "usd",
+                payment_method_types: ["card"],
+            });
+
+            res.send({
+                clientSecret: paymentIntent.client_secret,
+            });
+        });
+
         // PUT METHODS
-        app.put("/users/:email", async (req, res) => {
-            const { email } = req.params;
+
+        // Update Profile
+        app.put("/users/:id", async (req, res) => {
+            const { id } = req.params;
             const userInfo = req.body;
             const options = { upsert: true };
-            const query = { email: email };
+            const query = { _id: ObjectId(id) };
+
             const updateDoc = {
-                $set: {
-                    name: userInfo.name,
-                    addresses: [
-                        (shippingAddress = userInfo.shippingAddress),
-                        (billingAddress = userInfo.billingAddress),
-                    ],
-                    phone: userInfo.phone,
-                },
+                $set: userInfo,
             };
             const result = await users.updateOne(query, updateDoc, options);
             res.json(result);
@@ -155,12 +187,11 @@ async function run() {
             //         ],
             //     },
             // ];
-            console.log(req.body?.del);
 
             const { email } = req.params;
 
             const cartItem = req.body;
-            console.log(cartItem);
+
             const options = { upsert: true };
             const query = { email: email };
             const allCarts = carts.find(query);
@@ -174,7 +205,6 @@ async function run() {
             ); // check if product already exist in cart
 
             const updateCart = async (cart) => {
-                console.log(cart);
                 const updateDoc = {
                     $set: {
                         cart: cart,
@@ -190,12 +220,10 @@ async function run() {
 
             // CART FILTER
             if (req.body.del) {
-                console.log(req.body);
                 const fliteredCart = allCartArray[0]?.cart.filter(
                     (pd) => pd.id !== cartItem.id
                 );
-                console.log(cartItem.id);
-                console.log(allCartArray[0]?.cart);
+
                 updateCart(fliteredCart);
             } else {
                 if (checkProduct) {
